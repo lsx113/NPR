@@ -131,7 +131,7 @@
                 // --- 3. 最终颜色合并 ---
                 #if _USE_SDF_SHADOW
                     float3 litColor = baseMap.rgb;
-                    float3 darkColor = baseMap.rgb * (_ShadowColor.rgb+0.4);
+                    float3 darkColor = baseMap.rgb * (_ShadowColor.rgb);
                     float3 finalColor = lerp(darkColor, litColor, sdf);
                     #else
 

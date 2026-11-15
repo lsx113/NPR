@@ -18,6 +18,17 @@
         _ShadowPosition ("Shadow Position(明暗分界线位置)",Range(0,1)) = 0.5
         _ShadowSoftness ("Shadow Softness(阴影边缘硬度)", Float) = 0.1
         _ShadowWidth("Shadow Width(阴影宽度)",Float)=1.0
+        [Header(Fresnel Rim)]
+        [HDR] _RimColor("Rim Color", Color) = (0.6, 0.8, 1, 1)
+        _RimIntensity("Rim Intensity(边缘光强度)", Range(0, 3)) = 0.3
+        _RimPower("Rim Power(边缘光收紧)", Range(0.1, 10)) = 3
+        [Header(Blinn Phong Specular)]
+        [HDR] _SpecularColor("Specular Color", Color) = (1, 1, 1, 1)
+        _SpecularIntensity("Specular Intensity(高光强度)", Range(0, 5)) = 0.8
+        _Shininess("Shininess(高光收紧)", Range(1, 256)) = 48
+        [Header(Outline)]
+        _OutlineColor("Outline Color(描边颜色)", Color) = (0.04, 0.025, 0.035, 1)
+        _OutlineWidth("Outline Width(描边宽度)", Range(0, 0.02)) = 0.003
     }
 
     SubShader
@@ -46,6 +57,14 @@
             float _UseShadow4;
             float _UseShadow5;
             float _IsDay;
+            float4 _RimColor;
+            float _RimIntensity;
+            float _RimPower;
+            float4 _SpecularColor;
+            float _SpecularIntensity;
+            float _Shininess;
+            float4 _OutlineColor;
+            float _OutlineWidth;
         CBUFFER_END
         //纹理
         TEXTURE2D(_BaseMap);
@@ -102,12 +121,14 @@
                 float2 uv0:TEXCOORD0;//第一套纹理
                 float3 normalWS:TEXCOORD1;//世界空间法线
                 float3 color:TEXCOORD2;//顶点颜色
+                float3 positionWS : TEXCOORD3;//世界位置
             };
             VertOUT vert(VertIN input){
                 VertOUT output;
                 //位置
                 VertexPositionInputs vertexInput=GetVertexPositionInputs(input.positionOS);
                 output.positionCS=vertexInput.positionCS;
+                output.positionWS=vertexInput.positionWS;
                 //法线
                 VertexNormalInputs vertexNormal=GetVertexNormalInputs(input.normalOS);
                 output.normalWS=vertexNormal.normalWS;
@@ -162,9 +183,110 @@
                 #else
                     float3 finalColor=basecolor*halflambert*(shadow+0.2);
                 #endif
+                // 表面指向相机的世界空间方向
+                float3 V = GetWorldSpaceNormalizeViewDir(input.positionWS);
+
+                // ---------- 菲涅尔边缘光 ----------
+                float NdotV = saturate(dot(N, V));
+
+                float rim = pow(
+                1.0 - NdotV,
+                max(_RimPower, 0.001)
+                );
+
+                float3 rimColor =
+                rim * _RimColor.rgb * _RimIntensity;
+
+                // ---------- Blinn-Phong 高光 ----------
+                float3 H = SafeNormalize(L + V);
+                float NdotH = saturate(dot(N, H));
+
+                float specular = pow(
+                NdotH,
+                max(_Shininess, 1.0)
+                );
+
+                // B 通道控制高光强度，黑色区域没有高光
+                specular *= saturate(lightmap.b);
+
+                // 降低背光面的高光
+                specular *= saturate(dot(N, L));
+
+                // R 通道控制普通高光与金属色高光的过渡
+                float3 specularTint = lerp(
+                _SpecularColor.rgb,
+                _SpecularColor.rgb * basecolor,
+                saturate(lightmap.r)
+                );
+
+                float3 specularColor =
+                specularTint *
+                specular *
+                _SpecularIntensity *
+                light.color;
+
+                // ---------- 合成 ----------
+                finalColor += rimColor + specularColor;
                 return float4(finalColor,0);
             }
+
             ENDHLSL
+		}
+        //描边
+		Pass
+		{
+			Name "NPROutline"
+			Tags { "LightMode" = "NPROutline" }
+
+			Cull Front
+			ZWrite Off
+			ZTest LEqual
+
+			HLSLPROGRAM
+			#pragma vertex OutlineVert
+			#pragma fragment OutlineFrag
+
+			struct OutlineAttributes
+			{
+				float3 positionOS : POSITION;
+				float3 normalOS   : NORMAL;
+			};
+
+			struct OutlineVaryings
+			{
+				float4 positionCS : SV_POSITION;
+			};
+
+			OutlineVaryings OutlineVert(OutlineAttributes input)
+			{
+				OutlineVaryings output;
+
+				// 1. 顶点位置转换到世界空间
+				float3 positionWS =
+				TransformObjectToWorld(input.positionOS);
+
+				// 2. 法线转换到世界空间并归一化
+				float3 normalWS =
+				normalize(TransformObjectToWorldNormal(input.normalOS));
+
+				// 3. 沿世界空间法线外扩
+				positionWS += normalWS * _OutlineWidth;
+
+				// 4. 转换到裁剪空间
+				output.positionCS =
+				TransformWorldToHClip(positionWS);
+
+				return output;
+			}
+
+			half4 OutlineFrag(OutlineVaryings input) : SV_Target
+			{
+				// 宽度为 0 时关闭描边
+				clip(_OutlineWidth - 0.000001);
+
+				return half4(_OutlineColor.rgb, 1);
+			}
+			ENDHLSL
 		}
 	}
 }
